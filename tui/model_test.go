@@ -3172,3 +3172,246 @@ func TestCompareView_CacheInvalidatedOnResize(t *testing.T) {
 		t.Error("content should change after resize (different wrapping)")
 	}
 }
+
+func TestPatchLoadingSmokeTest(t *testing.T) {
+	d, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	now := time.Now().UTC()
+	date := now.Add(-2 * 24 * time.Hour).Format("2006-01-02T15:04:05")
+
+	d.SaveSeries(db.SeriesRow{
+		ID: 70, Name: "Lorem smoke series", Date: date,
+		Version: 2, Submitter: "Lorem Ipsum",
+		SubmitterEmail: "lorem@example.com",
+		DetailFetched: true, TotalPatches: 2,
+	})
+	d.SaveMaintainers([]db.MaintainerRow{
+		{ID: 1, Username: "dolor", FirstName: "dolor"},
+	})
+
+	d.SavePatch(db.PatchRow{
+		ID: 400, SeriesID: 70,
+		Name: "[PATCH v2 1/2] Lorem first change", State: "new",
+		Submitter: "Lorem Ipsum", SubmitterEmail: "lorem@example.com",
+		Delegate: "dolor", Date: date,
+	})
+	d.SavePatch(db.PatchRow{
+		ID: 401, SeriesID: 70,
+		Name: "[PATCH v2 2/2] Lorem second change", State: "new",
+		Submitter: "Lorem Ipsum", SubmitterEmail: "lorem@example.com",
+		Date: date,
+	})
+
+	d.UpdatePatchDetail(400,
+		"This is the body of patch 1.",
+		"--- a/file.c\n+++ b/file.c\n@@ -1,3 +1,4 @@\n context\n+added line\n context\n",
+		`{"To":"dev@example.com"}`, "")
+	d.UpdatePatchDetail(401,
+		"This is the body of patch 2.",
+		"--- a/other.c\n+++ b/other.c\n@@ -5,3 +5,4 @@\n context\n+another line\n context\n",
+		`{"To":"dev@example.com"}`, "")
+
+	d.UpdatePatchChecks(400, 2, 0, 1)
+	d.UpdatePatchChecks(401, 1, 1, 0)
+	d.MarkChecksFetched(400)
+	d.MarkChecksFetched(401)
+	d.MarkCommentsFetched(400)
+	d.MarkCommentsFetched(401)
+
+	d.SaveCheck(db.CheckRow{
+		ID: 1, PatchID: 400,
+		Context: "ci/build", State: "success",
+		Description: "Build passed",
+	})
+
+	d.SaveTags(400, 0, 0, "comment", map[string]map[string]bool{
+		"acked":    {"Lorem <lorem@example.com>": true},
+		"reviewed": {"Dolor <dolor@example.com>": true},
+	})
+
+	d.InsertComment(db.CommentRow{
+		ID: 500, PatchID: 400,
+		Submitter: "Dolor Amet", Date: date,
+		Subject: "Re: Lorem first change",
+		Content: "Looks good to me.\n\nAcked-by: Dolor <dolor@example.com>\n",
+	})
+
+	d.SaveCover(db.CoverRow{
+		ID: 69, SeriesID: 70,
+		Name: "[PATCH v2 0/2] Lorem smoke series",
+		Date: date,
+	})
+	d.UpdateCoverDetail(69,
+		"Cover letter body explaining the series.",
+		`{"To":"dev@example.com"}`)
+	d.MarkCoverCommentsFetched(69)
+
+	m := NewModel(d, []string{"new"}, "test-token")
+	m.Status = status.NewRegistry(nil)
+	m.width = 120
+	m.height = 30
+
+	t.Run("series_row_loaded", func(t *testing.T) {
+		if len(m.RowData) != 1 {
+			t.Fatalf("RowData = %d, want 1", len(m.RowData))
+		}
+		rd := m.RowData[0].Data
+		if rd[ColID] != "70" {
+			t.Errorf("ColID = %q, want 70", rd[ColID])
+		}
+		if rd[ColVer] != "v2" {
+			t.Errorf("ColVer = %q, want v2", rd[ColVer])
+		}
+		if !strings.Contains(rd[ColName], "Lorem smoke series") {
+			t.Errorf("ColName = %q, want to contain 'Lorem smoke series'", rd[ColName])
+		}
+		if rd[ColState] != "new" {
+			t.Errorf("ColState = %q, want 'new'", rd[ColState])
+		}
+		if rd[ColSubmitter] != "Lorem Ipsum" {
+			t.Errorf("ColSubmitter = %q, want 'Lorem Ipsum'", rd[ColSubmitter])
+		}
+		if rd[ColAge] == "" {
+			t.Error("ColAge should not be empty")
+		}
+		if rd[ColChecks] != "3 1 1" {
+			t.Errorf("ColChecks = %q, want '3 1 1'", rd[ColChecks])
+		}
+		if rd[ColDelegate] != "Dolor" {
+			t.Errorf("ColDelegate = %q, want 'Dolor'", rd[ColDelegate])
+		}
+	})
+
+	t.Run("sub_rows_populated", func(t *testing.T) {
+		if len(m.RowData[0].SubRows) != 2 {
+			t.Fatalf("SubRows = %d, want 2", len(m.RowData[0].SubRows))
+		}
+		sub0 := m.RowData[0].SubRows[0]
+		if sub0[ColID] != "400" {
+			t.Errorf("SubRow[0] ColID = %q, want 400", sub0[ColID])
+		}
+		if sub0[ColState] != "new" {
+			t.Errorf("SubRow[0] ColState = %q, want 'new'", sub0[ColState])
+		}
+		if sub0[ColChecks] != "2 - 1" {
+			t.Errorf("SubRow[0] ColChecks = %q, want '2 - 1'", sub0[ColChecks])
+		}
+		sub1 := m.RowData[0].SubRows[1]
+		if sub1[ColID] != "401" {
+			t.Errorf("SubRow[1] ColID = %q, want 401", sub1[ColID])
+		}
+		if sub1[ColChecks] != "1 1 -" {
+			t.Errorf("SubRow[1] ColChecks = %q, want '1 1 -'", sub1[ColChecks])
+		}
+	})
+
+	t.Run("fetched_status", func(t *testing.T) {
+		if !m.RowData[0].Fetched {
+			t.Error("RowData[0].Fetched should be true")
+		}
+		if !m.RowData[0].SubRowFetched[0] {
+			t.Error("SubRowFetched[0] should be true")
+		}
+		if !m.RowData[0].SubRowFetched[1] {
+			t.Error("SubRowFetched[1] should be true")
+		}
+	})
+
+	t.Run("expand_and_navigate", func(t *testing.T) {
+		m = pressKey(m, " ")
+		if !m.RowData[0].Expanded {
+			t.Error("series should be expanded after space")
+		}
+		items := m.getVisibleItems()
+		if len(items) != 3 {
+			t.Fatalf("visible items = %d, want 3", len(items))
+		}
+		if !items[1].isSubRow || items[1].data[ColID] != "400" {
+			t.Errorf("item[1] should be sub-row 400, got isSubRow=%v id=%q",
+				items[1].isSubRow, items[1].data[ColID])
+		}
+		m = pressKey(m, "j")
+		if m.selectedRow != 1 {
+			t.Errorf("selectedRow = %d, want 1", m.selectedRow)
+		}
+	})
+
+	t.Run("open_patch_view", func(t *testing.T) {
+		m = pressSpecialKey(m, tea.KeyEnter)
+		if m.viewMode != viewPatch {
+			t.Fatalf("viewMode = %d, want viewPatch", m.viewMode)
+		}
+		if m.viewingPatchID != 400 {
+			t.Errorf("viewingPatchID = %d, want 400", m.viewingPatchID)
+		}
+		if m.viewportLoading {
+			t.Error("viewportLoading should be false")
+		}
+		if len(m.viewportLines) == 0 {
+			t.Fatal("viewportLines should have content")
+		}
+		content := strings.Join(m.viewportLines, "\n")
+		if !strings.Contains(content, "body of patch 1") {
+			t.Error("viewport should contain patch body text")
+		}
+		if !strings.Contains(content, "+added line") {
+			t.Error("viewport should contain diff")
+		}
+	})
+
+	t.Run("comments_loaded", func(t *testing.T) {
+		if len(m.viewComments) != 1 {
+			t.Fatalf("viewComments = %d, want 1", len(m.viewComments))
+		}
+		if m.viewComments[0].Submitter != "Dolor Amet" {
+			t.Errorf("comment submitter = %q", m.viewComments[0].Submitter)
+		}
+		if !strings.Contains(m.viewComments[0].Content, "Looks good") {
+			t.Error("comment should contain 'Looks good'")
+		}
+		if m.viewCommentIdx != -1 {
+			t.Errorf("viewCommentIdx = %d, want -1", m.viewCommentIdx)
+		}
+	})
+
+	t.Run("navigate_comments", func(t *testing.T) {
+		m = pressSpecialKey(m, tea.KeyRight)
+		if m.viewCommentIdx != 0 {
+			t.Fatalf("viewCommentIdx = %d, want 0", m.viewCommentIdx)
+		}
+		content := strings.Join(m.viewportLines, "\n")
+		if !strings.Contains(content, "Looks good") {
+			t.Error("comment view should contain 'Looks good'")
+		}
+		m = pressSpecialKey(m, tea.KeyRight)
+		if m.viewCommentIdx != -1 {
+			t.Errorf("viewCommentIdx = %d, want -1 (wrapped back)", m.viewCommentIdx)
+		}
+	})
+
+	t.Run("return_and_open_cover", func(t *testing.T) {
+		m = pressKey(m, "q")
+		if m.viewMode != viewTable {
+			t.Fatalf("viewMode = %d, want viewTable after q", m.viewMode)
+		}
+		m = pressKey(m, "k")
+		m = pressSpecialKey(m, tea.KeyEnter)
+		if m.viewMode != viewPatch {
+			t.Fatalf("viewMode = %d, want viewPatch", m.viewMode)
+		}
+		if m.viewingCoverID == 0 {
+			t.Error("viewingCoverID should be set")
+		}
+		if len(m.viewportLines) == 0 {
+			t.Fatal("viewportLines should have content")
+		}
+		content := strings.Join(m.viewportLines, "\n")
+		if !strings.Contains(content, "Cover letter body") {
+			t.Error("viewport should contain cover letter body")
+		}
+	})
+}
