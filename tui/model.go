@@ -237,6 +237,8 @@ type Model struct {
 	searchRegex     *regexp.Regexp
 	searchMatches   []searchMatch
 	searchIdx       int
+	searchHistory   []string
+	searchHistoryIdx int // -1 = typing new query, 0+ = browsing history
 	listPrefix      string
 	delegateNames   map[string]string
 
